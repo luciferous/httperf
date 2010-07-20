@@ -117,7 +117,7 @@ struct req
     int uri_len;
     char *contents;
     int contents_len;
-    char extra_hdrs[50];	/* plenty for "Content-length: 1234567890" */
+    char extra_hdrs[1000];	/* plenty for "Content-length: 1234567890" + custom headers */
     int extra_hdrs_len;
   };
 
@@ -392,6 +392,7 @@ parse_config (void)
   char line[10000];	/* some uri's get pretty long */
   char uri[10000];	/* some uri's get pretty long */
   char method_str[1000];
+  char headers_str[1000]; /* for capturing extra headers */
   char this_arg[10000];
   char contents[10000];
   double think_time;
@@ -467,6 +468,103 @@ parse_config (void)
 	    }
 	  else if (sscanf (this_arg, "think=%lf", &think_time) == 1)
 	    current_burst->user_think_time = think_time;
+	  else if (sscanf (this_arg, "headers=%s", headers_str) == 1)
+	    {
+	      /* this is tricky since headers might be a quoted
+		 string with embedded spaces or escaped quotes.  We
+		 should parse this carefully from parsed_so_far */
+	      from = strchr (parsed_so_far, '=') + 1;
+	      to = headers_str;
+	      single_quoted = FALSE;
+	      double_quoted = FALSE;
+	      escaped = FALSE;
+	      done = FALSE;
+	      while ((ch = *from++) != '\0' && !done)
+		{
+		  if (escaped == TRUE)
+		    {
+		      switch (ch)
+			{
+			case 'n':
+			  *to++ = '\n';
+			  break;
+			case 'r':
+			  *to++ = '\r';
+			  break;
+			case 't':
+			  *to++ = '\t';
+			  break;
+			case '\n':
+			  *to++ = '\n';
+			  /* this allows an escaped newline to
+			     continue the parsing to the next line. */
+			  if (fgets(line,sizeof(line),fp) == NULL)
+			    {
+			      lineno++;
+			      panic ("%s: premature EOF seen in '%s'\n",
+				     prog_name, param.wsesslog.file);
+			    }
+			  parsed_so_far = from = line;
+			  break;
+			default:
+			  *to++ = ch;
+			  break;
+			}
+		      escaped = FALSE;
+		    }
+		  else if (ch == '"' && double_quoted)
+		    {
+		      double_quoted = FALSE;
+		    }
+		  else if (ch == '\'' && single_quoted)
+		    {
+		      single_quoted = FALSE;
+		    }
+		  else
+		    {
+		      switch (ch)
+			{
+			case '\t':
+			case '\n':
+			case ' ':
+			  if (single_quoted == FALSE &&
+			      double_quoted == FALSE)
+			    done = TRUE;	/* we are done */
+			  else
+			    *to++ = ch;
+			  break;
+			case '\\':		/* backslash */
+			  escaped = TRUE;
+			  break;
+			case '"':		/* double quote */
+			  if (single_quoted)
+			    *to++ = ch;
+			  else
+			    double_quoted = TRUE;
+			  break;
+			case '\'':		/* single quote */
+			  if (double_quoted)
+			    *to++ = ch;
+			  else
+			    single_quoted = TRUE;
+			  break;
+			default:
+			  *to++ = ch;
+			  break;
+			}
+		    }
+		}
+	      *to = '\0';
+	      from--;		/* back up 'from' to '\0' or white-space */
+	      bytes_read = from - parsed_so_far;
+
+	  snprintf (sptr->current_req->extra_hdrs,
+		    sizeof(sptr->current_req->extra_hdrs),
+		    strdup(headers_str));
+	  sptr->current_req->extra_hdrs_len =
+	    strlen (sptr->current_req->extra_hdrs);
+
+	    }
 	  else if (sscanf (this_arg, "contents=%s", contents) == 1)
 	    {
 	      /* this is tricky since contents might be a quoted
@@ -559,9 +657,11 @@ parse_config (void)
 	      if ((sptr->current_req->contents_len = strlen (contents)) != 0)
 		{
 		  sptr->current_req->contents = strdup (contents);
+		  /* append content length to the end of existing headers */
 		  snprintf (sptr->current_req->extra_hdrs,
 			    sizeof(sptr->current_req->extra_hdrs),
-			    "Content-length: %d\r\n",
+			    "%sContent-length: %d\r\n",
+			   strdup(sptr->current_req->extra_hdrs),
 			   sptr->current_req->contents_len);
 		  sptr->current_req->extra_hdrs_len =
 		    strlen (sptr->current_req->extra_hdrs);
